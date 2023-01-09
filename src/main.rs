@@ -8,16 +8,19 @@ use lddtree::{DependencyAnalyzer, DependencyTree};
 
 use petgraph::algo::toposort;
 use petgraph::graphmap::DiGraphMap;
+use petgraph::dot::{Dot, Config};
 
 use serde::{Serialize, Deserialize};
 use serde_json;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use log::{error, info, warn};
+use log::info;
 use log4rs;
+use petgraph::Graph;
+use petgraph::graph::NodeIndex;
 
 
 #[derive(Parser, Debug)]
@@ -40,7 +43,7 @@ struct Args {
     output_file: PathBuf,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialOrd, Ord, PartialEq, Eq)]
 struct Edge {
     src: String,
     dst: String,
@@ -56,7 +59,7 @@ struct Lib {
 struct TopoSortResult {
     vertices: Vec<String>,
     edges: Vec<Edge>,
-    library_map: HashMap<String, Lib>,
+    library_map: BTreeMap<String, Lib>,
     topo_sorted_libs: Vec<Lib>,
 }
 
@@ -79,7 +82,26 @@ fn main() {
     info!("{} has {} dependencies", main_file_name, deps.libraries.len());
 
     let result = get_topologically_sorted_result(&main_file_name, &main_file_path, &deps);
-    serde_json::to_writer_pretty(&File::create(args.output_file).unwrap(), &result).unwrap();
+    serde_json::to_writer_pretty(&File::create(args.output_file.clone()).unwrap(), &result).unwrap();
+
+    let dot_path = Path::new(&args.output_file).parent().unwrap().join(format!("{}.dot", Path::new(&args.output_file).file_stem().unwrap().to_str().unwrap()));
+    export_to_dot(&result, dot_path);
+}
+
+fn export_to_dot(result: &TopoSortResult, dot_path: PathBuf) {
+    let mut graph_to_export = Graph::<_, i32>::new();
+    let mut vertex_to_index: HashMap::<String, NodeIndex> = HashMap::new();
+    result.vertices.iter().for_each(|v| {
+        let idx: NodeIndex = graph_to_export.add_node(v.clone());
+        vertex_to_index.insert(v.clone(), idx);
+    });
+    result.edges.iter().for_each(|edge| {
+        let from_idx = vertex_to_index.get(&edge.src).unwrap().clone();
+        let to_idx = vertex_to_index.get(&edge.dst).unwrap().clone();
+        graph_to_export.add_edge(from_idx, to_idx, 0);
+    });
+    std::fs::write(dot_path, format!("{}", Dot::with_config(&graph_to_export, &[Config::EdgeNoLabel])))
+        .expect("Unable to write file");
 }
 
 fn get_topologically_sorted_result(main_lib_name: &str, main_lib_path: &str, deps: &DependencyTree) -> TopoSortResult {
@@ -113,8 +135,10 @@ fn get_topologically_sorted_result(main_lib_name: &str, main_lib_path: &str, dep
     }
     let mut vertices: Vec<String> = Vec::with_capacity(di_graph_map.node_count());
     di_graph_map.nodes().for_each(|vertex_id| {
-        vertices.push(String::from(id_gen.get_by_id(vertex_id).unwrap()));
+        let v = String::from(id_gen.get_by_id(vertex_id).unwrap());
+        vertices.push(v.clone());
     });
+    vertices.sort();
 
     let mut edges: Vec<Edge> = Vec::with_capacity(di_graph_map.edge_count());
     di_graph_map.all_edges().for_each(|(from, to, _)| {
@@ -122,8 +146,9 @@ fn get_topologically_sorted_result(main_lib_name: &str, main_lib_path: &str, dep
         let to = String::from(id_gen.get_by_id(to).unwrap());
         edges.push(Edge { src: from, dst: to });
     });
+    edges.sort();
 
-    let mut library_map: HashMap<String, Lib> = HashMap::new();
+    let mut library_map: BTreeMap<String, Lib> = BTreeMap::new();
     for (name, lib) in &deps.libraries {
         let path = String::from(lib.path.as_path().to_str().unwrap());
         library_map.insert(name.clone(), Lib { name: name.clone(), path: Some(path) });
