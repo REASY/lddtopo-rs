@@ -17,8 +17,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+#[macro_use]
+extern crate log;
+
 use log::info;
-use log4rs;
 use petgraph::Graph;
 use petgraph::graph::NodeIndex;
 
@@ -64,8 +66,7 @@ struct TopoSortResult {
 }
 
 fn main() {
-    log4rs::init_file("config/log4rs.yaml", Default::default()).unwrap();
-
+    env_logger::init();
 
     let args = Args::parse();
     assert!(args.shared_library_path.exists(), "Provided shared library at {} does not exist", args.shared_library_path.to_str().unwrap());
