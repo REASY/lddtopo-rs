@@ -106,16 +106,60 @@ fn export_to_dot(result: &TopoSortResult, dot_path: PathBuf) {
 }
 
 fn get_topologically_sorted_result(main_lib_name: &str, main_lib_path: &str, deps: &DependencyTree) -> TopoSortResult {
+    // Imagine we have 6 libraries, A, B, C, D, E and F
+    // A depends on B
+    // A depends on C
+    // A depends on F
+    // B depends on D
+    // C depends on D
+    // D depends on E
+    // E depends on F
+    // The following direct acyclic graph represents the dependency between libraries, the edge means `depends`, A -> B means A depends on B
+    /*
+          ┌─────────────┐
+          │             │
+   ┌──────A──────┐      │
+   │             │      │
+   │             │      │
+   ▼             ▼      │
+   B             C      │
+   │             │      │
+   └─────►D◄─────┘      │
+          │             │
+          │             │
+          ▼             ▼
+          E───────────► F
+    */
+    // The usage of topological sorting from Wiki:
+    // The canonical application of topological sorting is in scheduling a sequence of jobs or tasks based on their dependencies.
+    // The jobs are represented by vertices, and there is an edge from x to y if job x must be completed before job y can be started
+
+    // If library A depends on library B, B must come before A (B must be loaded first).
+    // In terms of DAG it means we should swap the edge between vertices, the graph will become
+    /*
+
+  ┌──────F───────┐
+  │              │
+  ▼              ▼
+  E       ┌─────►A◄─────┐
+  │       │             │
+  │       B             C
+  │       ▲             ▲
+  │       └──────D──────┘
+  │              ▲
+  └──────────────┘
+     */
+
     let mut di_graph_map = DiGraphMap::new();
     let mut id_gen = IdGen::new();
 
     let main_lib_id: u32 = id_gen.get_next_id(main_lib_name);
-    // Connect direct dependencies of a main lib to main lib
     for direct_dep in &deps.needed {
         let direct_lib_id = id_gen.get_next_id(direct_dep.as_str());
         if !di_graph_map.contains_node(direct_lib_id) {
             di_graph_map.add_node(direct_lib_id);
         }
+        // `main_lib_id` depends on `direct_lib_id`, but the edge points that `direct_lib_id` must come before `main_lib_id`
         di_graph_map.add_edge(direct_lib_id, main_lib_id, ());
     }
 
@@ -130,6 +174,7 @@ fn get_topologically_sorted_result(main_lib_name: &str, main_lib_path: &str, dep
                 if !di_graph_map.contains_node(dep_lib_id) {
                     di_graph_map.add_node(dep_lib_id);
                 }
+                // `lib_id` depends on `dep_lib_id`, but the edge points that `dep_lib_id` must come before `lib_id`
                 di_graph_map.add_edge(dep_lib_id, lib_id, ());
             }
         }
