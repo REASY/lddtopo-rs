@@ -17,9 +17,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-#[macro_use]
-extern crate log;
-
 use log::info;
 use petgraph::Graph;
 use petgraph::graph::NodeIndex;
