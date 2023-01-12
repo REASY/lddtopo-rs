@@ -6,7 +6,7 @@ use crate::id_gen::IdGen;
 
 use lddtree::{DependencyAnalyzer, DependencyTree};
 
-use petgraph::algo::toposort;
+use petgraph::algo::{Cycle, toposort};
 use petgraph::graphmap::DiGraphMap;
 use petgraph::dot::{Dot, Config};
 
@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use log::info;
+use log::{error, info};
 use petgraph::Graph;
 use petgraph::graph::NodeIndex;
 
@@ -79,11 +79,16 @@ fn main() {
     let deps: DependencyTree = analyzer.analyze(args.shared_library_path).unwrap();
     info!("{} has {} dependencies", main_file_name, deps.libraries.len());
 
-    let result = get_topologically_sorted_result(&main_file_name, &main_file_path, &deps);
-    serde_json::to_writer_pretty(&File::create(args.output_file.clone()).unwrap(), &result).unwrap();
-
-    let dot_path = Path::new(&args.output_file).parent().unwrap().join(format!("{}.dot", Path::new(&args.output_file).file_stem().unwrap().to_str().unwrap()));
-    export_to_dot(&result, dot_path);
+    match get_topologically_sorted_result(&main_file_name, &main_file_path, &deps) {
+        Err(err) => {
+            error!("The graph is not DAG, it contains cycle at {:?}", err);
+        }
+        Ok(result) => {
+            serde_json::to_writer_pretty(&File::create(args.output_file.clone()).unwrap(), &result).unwrap();
+            let dot_path = Path::new(&args.output_file).parent().unwrap().join(format!("{}.dot", Path::new(&args.output_file).file_stem().unwrap().to_str().unwrap()));
+            export_to_dot(&result, dot_path);
+        }
+    }
 }
 
 fn export_to_dot(result: &TopoSortResult, dot_path: PathBuf) {
@@ -102,7 +107,7 @@ fn export_to_dot(result: &TopoSortResult, dot_path: PathBuf) {
         .expect("Unable to write file");
 }
 
-fn get_topologically_sorted_result(main_lib_name: &str, main_lib_path: &str, deps: &DependencyTree) -> TopoSortResult {
+fn get_topologically_sorted_result(main_lib_name: &str, main_lib_path: &str, deps: &DependencyTree) -> Result<TopoSortResult, Cycle<u32>> {
     // Imagine we have 6 libraries, A, B, C, D, E and F
     // A depends on B
     // A depends on C
@@ -159,7 +164,6 @@ fn get_topologically_sorted_result(main_lib_name: &str, main_lib_path: &str, dep
         // `main_lib_id` depends on `direct_lib_id`, but the edge points that `direct_lib_id` must come before `main_lib_id`
         di_graph_map.add_edge(direct_lib_id, main_lib_id, ());
     }
-
     for (_, lib) in &deps.libraries {
         let lib_id = id_gen.get_next_id(lib.name.as_str());
         if !di_graph_map.contains_node(lib_id) {
@@ -197,7 +201,7 @@ fn get_topologically_sorted_result(main_lib_name: &str, main_lib_path: &str, dep
         library_map.insert(name.clone(), Lib { name: name.clone(), path: Some(path) });
     }
 
-    let topological_sorted = toposort(&di_graph_map, None).unwrap();
+    let topological_sorted = toposort(&di_graph_map, None)?;
     let mut topo_sorted_libs: Vec<Lib> = Vec::with_capacity(topological_sorted.len());
     for id in &topological_sorted {
         let lib_name = id_gen.get_by_id(*id).unwrap();
@@ -211,11 +215,165 @@ fn get_topologically_sorted_result(main_lib_name: &str, main_lib_path: &str, dep
             path: lib_path,
         });
     }
-    return TopoSortResult {
+    return Result::Ok(TopoSortResult {
         vertices: vertices,
         edges: edges,
         library_map: library_map,
         topo_sorted_libs: topo_sorted_libs,
-    };
+    });
 }
 
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::collections::HashMap;
+    use lddtree::{DependencyTree, Library};
+    use petgraph::algo::Cycle;
+    use crate::get_topologically_sorted_result;
+
+    type RetType = Result<(), Cycle<u32>>;
+
+    #[test]
+    fn get_topologically_sorted_result_when_input_is_empty_dag_should_work() -> RetType {
+        let dt = DependencyTree {
+            interpreter: None,
+            needed: vec![],
+            libraries: Default::default(),
+            rpath: vec![],
+            runpath: vec![],
+        };
+        let main_lib = "A";
+        let main_lib_path = "/tmp/A";
+        let toposorted = get_topologically_sorted_result(main_lib, main_lib_path, &dt)?;
+        assert_eq!(0, toposorted.vertices.len());
+        assert_eq!(0, toposorted.edges.len());
+        assert_eq!(0, toposorted.topo_sorted_libs.len());
+        Ok(())
+    }
+
+    #[test]
+    fn get_topologically_sorted_result_when_input_is_dag_with_two_vertices_should_work() -> RetType {
+        let dt = DependencyTree {
+            interpreter: None,
+            needed: vec!["B".to_string()],
+            libraries: Default::default(),
+            rpath: vec![],
+            runpath: vec![],
+        };
+        let main_lib = "A";
+        let main_lib_path = "/tmp/A";
+
+        let toposorted = get_topologically_sorted_result(main_lib, main_lib_path, &dt)?;
+        assert_eq!(2, toposorted.vertices.len());
+        assert_eq!(1, toposorted.edges.len());
+        assert_eq!(2, toposorted.topo_sorted_libs.len());
+
+        assert_eq!("B", toposorted.topo_sorted_libs[0].name);
+        assert_eq!("A", toposorted.topo_sorted_libs[1].name);
+        Ok(())
+    }
+
+    #[test]
+    fn get_topologically_sorted_result_when_input_is_small_dag_should_work() -> RetType {
+        let mut libraries: HashMap<String, Library> = HashMap::new();
+        libraries.insert("B".to_string(), Library {
+            name: "B".to_string(),
+            path: Default::default(),
+            realpath: None,
+            needed: vec!["D".to_string()],
+            rpath: vec![],
+            runpath: vec![],
+        });
+        libraries.insert("C".to_string(), Library {
+            name: "C".to_string(),
+            path: Default::default(),
+            realpath: None,
+            needed: vec!["D".to_string()],
+            rpath: vec![],
+            runpath: vec![],
+        });
+        libraries.insert("D".to_string(), Library {
+            name: "D".to_string(),
+            path: Default::default(),
+            realpath: None,
+            needed: vec!["E".to_string()],
+            rpath: vec![],
+            runpath: vec![],
+        });
+        libraries.insert("E".to_string(), Library {
+            name: "E".to_string(),
+            path: Default::default(),
+            realpath: None,
+            needed: vec!["F".to_string()],
+            rpath: vec![],
+            runpath: vec![],
+        });
+        libraries.insert("F".to_string(), Library {
+            name: "F".to_string(),
+            path: Default::default(),
+            realpath: None,
+            needed: vec![],
+            rpath: vec![],
+            runpath: vec![],
+        });
+        let dt = DependencyTree {
+            interpreter: None,
+            needed: vec!["B".to_string(), "C".to_string(), "F".to_string()],
+            libraries: libraries,
+            rpath: vec![],
+            runpath: vec![],
+        };
+        let main_lib = "A";
+        let main_lib_path = "/tmp/A";
+        let toposorted = get_topologically_sorted_result(main_lib, main_lib_path, &dt)?;
+        assert_eq!(6, toposorted.vertices.len());
+        assert_eq!(7, toposorted.edges.len());
+        assert_eq!(6, toposorted.topo_sorted_libs.len());
+
+        assert_eq!("F", toposorted.topo_sorted_libs[0].name);
+        assert_eq!("E", toposorted.topo_sorted_libs[1].name);
+        assert_eq!("D", toposorted.topo_sorted_libs[2].name);
+        assert_eq!("C", toposorted.topo_sorted_libs[3].name);
+        assert_eq!("B", toposorted.topo_sorted_libs[4].name);
+        assert_eq!("A", toposorted.topo_sorted_libs[5].name);
+        Ok(())
+    }
+
+    #[test]
+    fn get_topologically_sorted_result_when_input_is_not_dag_should_fail() {
+        let mut libraries: HashMap<String, Library> = HashMap::new();
+        libraries.insert("A".to_string(), Library {
+            name: "A".to_string(),
+            path: Default::default(),
+            realpath: None,
+            needed: vec!["B".to_string()],
+            rpath: vec![],
+            runpath: vec![],
+        });
+        libraries.insert("B".to_string(), Library {
+            name: "B".to_string(),
+            path: Default::default(),
+            realpath: None,
+            needed: vec!["A".to_string()],
+            rpath: vec![],
+            runpath: vec![],
+        });
+
+        let dt = DependencyTree {
+            interpreter: None,
+            needed: vec!["B".to_string()],
+            libraries: libraries,
+            rpath: vec![],
+            runpath: vec![],
+        };
+        let main_lib = "A";
+        let main_lib_path = "/tmp/A";
+
+        match get_topologically_sorted_result(main_lib, main_lib_path, &dt) {
+            Ok(x) => {
+                panic!("Should not find any topo sort, but found {:?}", x)
+            }
+            Err(_) => {}
+        }
+    }
+}
